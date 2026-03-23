@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createSilentTtsAdapter, type AsrAdapter } from "@maps/voice-core";
 
@@ -146,8 +146,18 @@ const stubApiClient: AssistantApiClient = {
   }
 };
 
+beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  window.scrollTo = vi.fn();
+  window.history.replaceState({}, "", "/");
+});
+
+afterEach(() => {
+  cleanup();
+});
+
 describe("App", () => {
-  it("renders compliance details and updates the presentation after manual input", async () => {
+  it("keeps presenter flow on the main page and updates the narration after manual input", async () => {
     render(
       <App
         apiClient={stubApiClient}
@@ -156,17 +166,37 @@ describe("App", () => {
       />
     );
 
-    expect(screen.getByText("Atlas Voice Studio")).toBeInTheDocument();
+    expect(screen.getByText("语音地图讲解台")).toBeInTheDocument();
     expect(await screen.findByText("审图号：GS(2024)1234号")).toBeInTheDocument();
-    expect((await screen.findAllByText("requires_configuration")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("运行设置")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("transcript-input"), {
       target: { value: "带我看看浦东新区的重点区域" }
     });
-    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+    fireEvent.click(screen.getByRole("button", { name: "提交任务" }));
 
     expect(await screen.findByText(/系统：已为你聚焦浦东新区/)).toBeInTheDocument();
-    expect(screen.getAllByText("浦东新区").length).toBeGreaterThan(0);
-    expect(screen.getByText("地图主视图")).toBeInTheDocument();
+    expect(screen.getByText("地图主舞台")).toBeInTheDocument();
+  });
+
+  it("moves settings and diagnostics onto a dedicated system page", async () => {
+    render(
+      <App
+        apiClient={stubApiClient}
+        asrAdapter={unsupportedAsr}
+        ttsAdapter={createSilentTtsAdapter()}
+      />
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "系统页" })[0]);
+
+    expect(await screen.findByRole("heading", { name: "运行设置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Provider 绑定" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "运行诊断" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "语音输入" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "返回讲解页" })[0]);
+
+    expect(await screen.findByRole("heading", { name: "语音输入" })).toBeInTheDocument();
   });
 });
