@@ -34,6 +34,8 @@ The production flow uses:
 
 If the server only has an older system Python, `infra/scripts/deploy.sh` will bootstrap a Miniforge Python runtime into `/opt/maps-bootstrap` and then invoke `deploy.py`.
 
+The shell wrapper prints explicit phase messages and download progress so bootstrap does not look stuck during the first run.
+
 ## Example deployment command
 
 ```bash
