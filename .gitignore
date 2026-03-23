@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+*.log
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+infra/runtime/
+*.egg-info/
