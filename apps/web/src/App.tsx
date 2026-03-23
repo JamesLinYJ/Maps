@@ -72,6 +72,14 @@ const LAYER_LABELS: Record<"vector" | "satellite", string> = {
   satellite: "卫星视图"
 };
 
+const OPS_MENU = ["语音会话", "地图舞台", "讲解节点", "合规显示", "运行栈"] as const;
+
+const SAMPLE_REQUESTS = [
+  "带我看看浦东新区的重点区域",
+  "放大到这个园区，并讲解它的产业分布",
+  "展示从机场到会展中心的大致路线，并说明沿线重点地标"
+] as const;
+
 function projectToViewport(value: number, min: number, max: number) {
   return ((value - min) / Math.max(max - min, 0.01)) * 100;
 }
@@ -580,6 +588,9 @@ export function App(props: AppProps) {
   const focusTags = Array.from(
     new Set(spotlightFeatures.flatMap((feature) => feature.tags))
   ).slice(0, 8);
+  const liveTranscript = partialTranscript || draft || "等待语音输入或文本提交。";
+  const topBindings = providerBindings.slice(0, 3);
+  const topWarnings = providerWarnings.slice(0, 3);
 
   return (
     <div className="app-shell">
@@ -588,16 +599,17 @@ export function App(props: AppProps) {
 
       <header className="hero-band">
         <div className="hero-copy">
-          <p className="eyebrow">Voice Map Presenter</p>
-          <h1>语音地图讲解助手</h1>
-          <p className="hero-alias">Atlas Voice Studio</p>
+          <p className="eyebrow">VOICE_MAP_OS</p>
+          <h1>语音地图讲解控制台</h1>
+          <p className="hero-alias">中文语音输入 / 地图聚焦 / 智能讲解</p>
           <p className="hero-lead">
-            用一句自然的话，就能让地图自动聚焦、标注重点并生成讲解。适合查看区域、园区、路线和重点地标。
+            用一句自然中文，就能让系统完成语音识别、意图理解、工具调用、地图聚焦与讲解输出，适合区域、园区、路线和重点地标演示。
           </p>
           <div className="hero-inline-list">
-            <span>支持语音输入</span>
-            <span>自动聚焦地图</span>
-            <span>来源信息可见</span>
+            <span>{formatModeLabel(runtime.mapMode)}</span>
+            <span>{currentProviderOption?.displayName ?? runtime.mapProvider}</span>
+            <span>{runtime.llmProvider}</span>
+            <span>{LAYER_LABELS[currentLayer]}</span>
           </div>
           <div className="hero-signal">
             <div className="signal-bars" aria-hidden="true">
@@ -607,24 +619,24 @@ export function App(props: AppProps) {
               <span />
               <span />
             </div>
-            <p>当前支持 OSM 参考底图与讲解叠层联动，地图事实和讲解内容仍由受控工具链生成。</p>
+            <p>地图事实、路线和高亮内容由受控工具链生成，模型只负责理解、规划和讲解，不直接决定地理事实。</p>
           </div>
         </div>
 
         <div className="hero-stats">
           <article className="hero-stat">
-            <p className="stat-label">当前状态</p>
+            <p className="stat-label">系统状态</p>
             <StatusBadge status={status} />
           </article>
           <article className="hero-stat">
-            <p className="stat-label">当前底图</p>
+            <p className="stat-label">地图模式</p>
             <strong>{currentProviderOption?.displayName ?? runtime.mapProvider}</strong>
-            <span>{LAYER_LABELS[currentLayer]}</span>
+            <span>{formatModeLabel(runtime.mapMode)}</span>
           </article>
           <article className="hero-stat">
             <p className="stat-label">当前焦点</p>
             <strong>{spotlightFeatures[0]?.name ?? "等待新讲解"}</strong>
-            <span>{formatModeLabel(runtime.mapMode)}</span>
+            <span>{formatStatusLabel(status)}</span>
           </article>
         </div>
       </header>
@@ -831,10 +843,22 @@ export function App(props: AppProps) {
         </section>
 
         <aside className="control-rail">
+          <section className="ops-section">
+            <p className="eyebrow">操作导航</p>
+            <div className="ops-menu">
+              {OPS_MENU.map((item, index) => (
+                <article className="ops-menu-item" key={item}>
+                  <span>{`0${index + 1}`}</span>
+                  <strong>{item}</strong>
+                </article>
+              ))}
+            </div>
+          </section>
+
           <SectionCard title="开始使用" subtitle="说一句话或输入文字，系统会自动帮你定位和讲解">
             <div className="control-row">
               <button className="primary-button" type="button" onClick={handleMicrophone}>
-                {status === "listening" ? "停止收音" : "开始说话"}
+                {status === "listening" ? "停止收音" : "启动语音"}
               </button>
               <button
                 className="secondary-button"
@@ -861,18 +885,33 @@ export function App(props: AppProps) {
                 placeholder="请输入或说出你的地图请求"
               />
               <button className="primary-button" type="submit">
-                提交
+                发送任务
               </button>
             </form>
             <div className="transcript-block">
               <p className="transcript-label">实时转写</p>
-              <p>{partialTranscript || "等待语音输入或文本提交。"}</p>
+              <p>{liveTranscript}</p>
+            </div>
+            <div className="sample-command-list">
+              {SAMPLE_REQUESTS.map((command) => (
+                <button
+                  className="sample-chip"
+                  key={command}
+                  type="button"
+                  onClick={() => {
+                    setDraft(command);
+                    void runTurn(command);
+                  }}
+                >
+                  {command}
+                </button>
+              ))}
             </div>
           </SectionCard>
 
           <SectionCard title="显示设置" subtitle="这里可以切换地图模式、底图来源和实验开关">
             <label>
-              Map Mode
+              地图模式
               <select
                 value={runtime.mapMode}
                 onChange={(event) =>
@@ -885,7 +924,7 @@ export function App(props: AppProps) {
                 </select>
               </label>
             <label>
-              Map Provider
+              底图提供方
               <select
                 value={runtime.mapProvider}
                 onChange={(event) =>
@@ -898,13 +937,13 @@ export function App(props: AppProps) {
                 {providerOptions.map((provider) => (
                   <option disabled={!provider.enabled} key={provider.id} value={provider.id}>
                     {provider.id}
-                    {provider.enabled ? "" : " (disabled)"}
+                    {provider.enabled ? "" : "（不可用）"}
                   </option>
                 ))}
               </select>
             </label>
             <label>
-              LLM Provider
+              大模型提供方
               <select
                 value={runtime.llmProvider}
                 onChange={(event) =>
@@ -914,9 +953,9 @@ export function App(props: AppProps) {
                   })
                 }
               >
-                <option value="openai">openai-compatible</option>
-                <option value="anthropic">anthropic</option>
-                <option value="gemini">gemini</option>
+                <option value="openai">OpenAI-compatible</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="gemini">Gemini</option>
               </select>
             </label>
             <label className="checkbox-row">
@@ -928,7 +967,7 @@ export function App(props: AppProps) {
                 }
                 type="checkbox"
               />
-              开启 foreign map experiments
+              启用海外地图实验链路
             </label>
           </SectionCard>
 
@@ -976,7 +1015,7 @@ export function App(props: AppProps) {
             <SourceCardList cards={latestSourceCards} />
             {showOsmSurface ? (
               <div className="transcript-block">
-                <p className="transcript-label">OSM attribution</p>
+                <p className="transcript-label">OSM 来源说明</p>
                 <p>
                   当前实验底图引用 OpenStreetMap。公开部署时不得将该路径替代中国公开模式下的国内合规 provider。
                 </p>
@@ -1009,7 +1048,7 @@ export function App(props: AppProps) {
                   </p>
                   <h3>{binding.adapterMode}</h3>
                   <p>{binding.message}</p>
-                  <p>credential: {binding.credentialEnvVar ?? "not required"}</p>
+                  <p>凭据变量：{binding.credentialEnvVar ?? "无需凭据"}</p>
                 </article>
               ))}
             </div>
