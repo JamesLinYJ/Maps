@@ -187,6 +187,8 @@ export function createToolRegistry(): ToolRegistry {
               payload: createRouteResult(from, to)
             };
           }
+          default:
+            throw new Error(`Unknown tool: ${toolCall.toolName}`);
         }
       });
     }

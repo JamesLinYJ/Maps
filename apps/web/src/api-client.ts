@@ -37,6 +37,20 @@ export interface AssistantApiClient {
   }): Promise<TurnResponse>;
 }
 
+async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 function resolveDefaultApiBaseUrl() {
   if (typeof window === "undefined") {
     return "http://127.0.0.1:8000";
@@ -65,7 +79,7 @@ export function createFetchAssistantApiClient(baseUrl = resolveDefaultApiBaseUrl
   return {
     async getRuntime() {
       // 前端只依赖稳定 HTTP 契约，具体 provider 差异都由后端封装。
-      const response = await fetch(`${baseUrl}/api/runtime`);
+      const response = await fetchWithTimeout(`${baseUrl}/api/runtime`, undefined, 12000);
       if (!response.ok) {
         throw await toError(response, "Failed to load runtime config");
       }
@@ -73,13 +87,25 @@ export function createFetchAssistantApiClient(baseUrl = resolveDefaultApiBaseUrl
     },
     async handleTurn(input) {
       // 把完整回合交给后端编排，前端只负责提交上下文并消费结构化结果。
-      const response = await fetch(`${baseUrl}/api/turn`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json"
-        },
-        body: JSON.stringify(input)
-      });
+      let response: Response;
+      try {
+        response = await fetchWithTimeout(
+          `${baseUrl}/api/turn`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json"
+            },
+            body: JSON.stringify(input)
+          },
+          30000
+        );
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new Error("地图请求处理时间过长，请重试或换一个更明确的地点。");
+        }
+        throw error;
+      }
 
       if (!response.ok) {
         throw await toError(response, "Turn request failed");

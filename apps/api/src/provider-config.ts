@@ -94,7 +94,7 @@ export function resolveRuntimeDefaults(env: EnvSource = {}): RuntimeConfig {
     llmProvider: readEnvValue(env, ENV_KEYS.llmProvider),
     enableForeignMapExperiments: parseBoolean(
       readEnvValue(env, ENV_KEYS.enableForeignMapExperiments),
-      true
+      false
     )
   });
 }

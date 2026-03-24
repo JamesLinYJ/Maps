@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import os
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -30,6 +30,26 @@ def write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def hash_files(paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def read_stamp(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8").strip() or None
+
+
+def write_stamp(path: Path, value: str) -> None:
+    write_text(path, f"{value}\n")
+
+
 def ensure_python_version() -> None:
     if sys.version_info < (3, 12):
         raise RuntimeError("deploy.py requires Python 3.12+")
@@ -56,25 +76,61 @@ WantedBy=multi-user.target
 
 
 def copy_repo(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
-    shutil.copytree(
-        src,
-        dst,
-        dirs_exist_ok=True,
-        ignore=shutil.ignore_patterns(
-            "node_modules",
-            "dist",
-            ".git",
-            ".pytest_cache",
-            "__pycache__",
-            "*.pyc",
-            ".backend.log",
-            ".backend.err.log",
-            ".web.log",
-            ".web.err.log",
-        ),
-    )
+    ignore_names = {
+        "node_modules",
+        "dist",
+        ".git",
+        ".pytest_cache",
+        "__pycache__",
+        ".backend.log",
+        ".backend.err.log",
+        ".web.log",
+        ".web.err.log",
+    }
+    preserved_names = {".deploy-state", ".env", ".venv", "node_modules"}
+
+    dst.mkdir(parents=True, exist_ok=True)
+
+    source_names = {
+        child.name
+        for child in src.iterdir()
+        if child.name not in ignore_names and child.name != ".git"
+    }
+
+    for child in dst.iterdir():
+        if child.name in preserved_names:
+            continue
+        if child.name not in source_names:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+    for child in src.iterdir():
+        if child.name in ignore_names:
+            continue
+        target = dst / child.name
+        if child.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(
+                child,
+                target,
+                ignore=shutil.ignore_patterns(
+                    "node_modules",
+                    "dist",
+                    ".git",
+                    ".pytest_cache",
+                    "__pycache__",
+                    "*.pyc",
+                    ".backend.log",
+                    ".backend.err.log",
+                    ".web.log",
+                    ".web.err.log",
+                ),
+            )
+        else:
+            shutil.copy2(child, target)
 
 
 def ensure_env_file(app_dir: Path) -> None:
@@ -91,6 +147,9 @@ def deploy(args: argparse.Namespace) -> None:
     repo_root = Path(args.repo_root).resolve()
     app_dir = Path(args.app_dir).resolve()
     service_file = Path("/etc/systemd/system") / f"{args.service_name}.service"
+    deploy_state_dir = app_dir / ".deploy-state"
+    python_stamp_file = deploy_state_dir / "python-deps.sha256"
+    node_stamp_file = deploy_state_dir / "node-deps.sha256"
 
     section("部署参数")
     info(f"源代码目录: {repo_root}")
@@ -104,15 +163,41 @@ def deploy(args: argparse.Namespace) -> None:
     success("代码已复制到部署目录")
 
     section("创建 Python 运行环境")
-    run([sys.executable, "-m", "venv", str(app_dir / ".venv")])
     venv_python = app_dir / ".venv" / "bin" / "python"
-    venv_pip = [str(venv_python), "-m", "pip"]
-    run(venv_pip + ["install", "--upgrade", "pip", "setuptools", "wheel"])
-    run(venv_pip + ["install", "-e", "."], cwd=app_dir)
-    success("Python 依赖安装完成")
+    if not venv_python.exists():
+        info("首次部署，创建 Python 虚拟环境")
+        run([sys.executable, "-m", "venv", str(app_dir / ".venv")])
+        venv_pip = [str(venv_python), "-m", "pip"]
+        run(venv_pip + ["install", "--upgrade", "pip", "setuptools", "wheel"])
+    else:
+        info("检测到现有 Python 虚拟环境，跳过重建")
+        venv_pip = [str(venv_python), "-m", "pip"]
+
+    python_dep_hash = hash_files([app_dir / "pyproject.toml"])
+    if read_stamp(python_stamp_file) != python_dep_hash:
+        info("Python 依赖描述已变化，开始增量安装依赖")
+        run(venv_pip + ["install", "-e", "."], cwd=app_dir)
+        write_stamp(python_stamp_file, python_dep_hash)
+        success("Python 依赖安装完成")
+    else:
+        success("Python 依赖未变化，跳过 pip install")
 
     section("安装前端依赖并构建")
-    run(["npm", "ci"], cwd=app_dir)
+    node_modules_dir = app_dir / "node_modules"
+    node_dep_hash = hash_files([app_dir / "package.json", app_dir / "package-lock.json"])
+    if not node_modules_dir.exists():
+        info("首次部署，安装前端依赖")
+        run(["npm", "ci"], cwd=app_dir)
+        write_stamp(node_stamp_file, node_dep_hash)
+        success("前端依赖安装完成")
+    elif read_stamp(node_stamp_file) != node_dep_hash:
+        info("前端依赖描述已变化，重新安装依赖")
+        run(["npm", "ci"], cwd=app_dir)
+        write_stamp(node_stamp_file, node_dep_hash)
+        success("前端依赖安装完成")
+    else:
+        success("前端依赖未变化，跳过 npm ci")
+
     run(["npm", "run", "build:web"], cwd=app_dir)
     success("前端构建完成")
 

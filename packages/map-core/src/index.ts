@@ -16,6 +16,8 @@ export interface MapViewState {
   policy: MapPolicy;
   currentBounds: Bounds;
   activeLayer: Layer;
+  cameraPitch: number;
+  cameraRotation: number;
   highlightedFeatureIds: string[];
   callouts: CalloutItem[];
   routeOverlay: RouteOverlayState | null;
@@ -28,6 +30,8 @@ export function createInitialMapViewState(policy: MapPolicy): MapViewState {
     policy,
     currentBounds: INITIAL_BOUNDS,
     activeLayer: "vector",
+    cameraPitch: 0,
+    cameraRotation: 0,
     highlightedFeatureIds: [],
     callouts: [],
     routeOverlay: null
@@ -35,12 +39,12 @@ export function createInitialMapViewState(policy: MapPolicy): MapViewState {
 }
 
 function clampBounds(bounds: Bounds): Bounds {
-  // 把演示坐标限制在 0-100 的舞台内，避免镜头被工具动作推到可视范围外。
+  // 允许真实经纬度或演示坐标进入状态，但始终保证 bounds 有序。
   return [
-    Math.max(0, bounds[0]),
-    Math.max(0, bounds[1]),
-    Math.min(100, bounds[2]),
-    Math.min(100, bounds[3])
+    Math.min(bounds[0], bounds[2]),
+    Math.min(bounds[1], bounds[3]),
+    Math.max(bounds[0], bounds[2]),
+    Math.max(bounds[1], bounds[3])
   ];
 }
 
@@ -72,6 +76,12 @@ export function applyMapActionPlan(state: MapViewState, plan: MapActionPlan): Ma
           ...currentState,
           currentBounds: zoomBounds(currentState.currentBounds, action.factor)
         };
+      case "set_camera":
+        return {
+          ...currentState,
+          cameraPitch: action.pitch ?? currentState.cameraPitch,
+          cameraRotation: action.rotation ?? currentState.cameraRotation
+        };
       case "set_layer":
         return {
           ...currentState,
@@ -95,6 +105,16 @@ export function applyMapActionPlan(state: MapViewState, plan: MapActionPlan): Ma
         return {
           ...currentState,
           callouts: action.items
+        };
+      case "clear_highlights":
+        return {
+          ...currentState,
+          highlightedFeatureIds: []
+        };
+      case "clear_callouts":
+        return {
+          ...currentState,
+          callouts: []
         };
       case "clear_route":
         return {

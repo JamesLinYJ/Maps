@@ -30,7 +30,10 @@ class Nl2SqlPlanner:
 
         target = classification.focus_query or classification.intent
         # SQL 预览只做说明性输出，真正执行时仍应走受控查询层和参数化策略。
-        safe_target = target.replace("'", " ").strip() or "map_presentation_features"
+        # 只保留字母、数字、空格、下划线和中文字符，防止 SQL 注入。
+        safe_target = "".join(
+            ch for ch in target if ch.isalnum() or ch in (" ", "_") or "\u4e00" <= ch <= "\u9fff"
+        ).strip() or "map_presentation_features"
         return Nl2SqlPlan(
             mode="structured_lookup",
             target=target,

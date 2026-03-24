@@ -11,6 +11,9 @@ export default defineConfig({
     outDir: resolve(rootDir, "dist/web"),
     emptyOutDir: true
   },
+  test: {
+    exclude: ["tests/e2e/**", "node_modules/**"]
+  },
   plugins: [react()],
   resolve: {
     alias: {

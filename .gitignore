@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 infra/runtime/
 *.egg-info/
+.playwright-cli/
+test-results/
+tmp-turn-request*.json

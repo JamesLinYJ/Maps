@@ -29,6 +29,20 @@ class Layer(str, Enum):
     SATELLITE = "satellite"
 
 
+class IntentKind(str, Enum):
+    FOCUS_AREA = "focus_area"
+    DETAIL_FOLLOW_UP = "detail_follow_up"
+    ROUTE_OVERVIEW = "route_overview"
+    MULTI_POINT_STORY = "multi_point_story"
+    LAYER_SWITCH = "layer_switch"
+    ZOOM_IN = "zoom_in"
+    ZOOM_OUT = "zoom_out"
+    RESET_VIEW = "reset_view"
+    TILT_VIEW = "tilt_view"
+    ROTATE_VIEW = "rotate_view"
+    CLEAR_OVERLAYS = "clear_overlays"
+
+
 class RuntimeConfig(BaseModel):
     # 对外接口继续使用 camelCase，保证前端和后端共享同一份 JSON 契约。
     map_mode: MapMode = Field(default=MapMode.INTERNAL, alias="mapMode")
@@ -77,7 +91,7 @@ class ToolCall(BaseModel):
 
 
 class IntentClassification(BaseModel):
-    intent: str
+    intent: IntentKind
     confidence: float
     requested_layer: Layer | None = Field(default=None, alias="requestedLayer")
     focus_query: str | None = Field(default=None, alias="focusQuery")
@@ -183,6 +197,14 @@ class MapPolicy(BaseModel):
     disclaimer_text: str = Field(alias="disclaimerText")
 
 
+class AssistantTurnStep(BaseModel):
+    id: str
+    classification: IntentClassification
+    tool_calls: list[ToolCall] = Field(alias="toolCalls")
+    tool_results: list[object] = Field(alias="toolResults")
+    map_action_plan: MapActionPlan = Field(alias="mapActionPlan")
+
+
 class AssistantTurnResult(BaseModel):
     response_mode: str = Field(alias="responseMode")
     policy: MapPolicy
@@ -191,6 +213,7 @@ class AssistantTurnResult(BaseModel):
     # toolResults 保留宽类型，后端先完成校验后再统一回传给前端。
     tool_results: list[object] = Field(alias="toolResults")
     map_action_plan: MapActionPlan = Field(alias="mapActionPlan")
+    steps: list[AssistantTurnStep] = Field(default_factory=list)
     narration: Narration
     clarification: Clarification | None = None
 

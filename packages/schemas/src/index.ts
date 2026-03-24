@@ -20,9 +20,9 @@ export type Layer = z.infer<typeof layerSchema>;
 
 export const runtimeConfigSchema = z.object({
   mapMode: mapModeSchema.default("internal"),
-  mapProvider: mapProviderSchema.default("osm"),
+  mapProvider: mapProviderSchema.default("amap"),
   llmProvider: llmProviderSchema.default("openai"),
-  enableForeignMapExperiments: z.boolean().default(true)
+  enableForeignMapExperiments: z.boolean().default(false)
 });
 export type RuntimeConfig = z.infer<typeof runtimeConfigSchema>;
 
@@ -92,6 +92,11 @@ export const intentClassificationSchema = z.object({
     "route_overview",
     "layer_switch",
     "zoom_in",
+    "zoom_out",
+    "reset_view",
+    "tilt_view",
+    "rotate_view",
+    "clear_overlays",
     "detail_follow_up",
     "multi_point_story"
   ]),
@@ -179,6 +184,12 @@ export const mapActionSchema = z.discriminatedUnion("type", [
     reason: z.string().min(1)
   }),
   z.object({
+    type: z.literal("set_camera"),
+    pitch: z.number().min(0).max(83).optional(),
+    rotation: z.number().min(0).max(360).optional(),
+    reason: z.string().min(1)
+  }),
+  z.object({
     type: z.literal("set_layer"),
     layer: layerSchema
   }),
@@ -196,6 +207,12 @@ export const mapActionSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("show_callouts"),
     items: z.array(calloutItemSchema).min(1)
+  }),
+  z.object({
+    type: z.literal("clear_highlights")
+  }),
+  z.object({
+    type: z.literal("clear_callouts")
   }),
   z.object({
     type: z.literal("clear_route")
@@ -273,6 +290,17 @@ export const assistantTurnResultSchema = z.object({
   toolCalls: z.array(toolCallSchema),
   toolResults: z.array(toolResultSchema),
   mapActionPlan: mapActionPlanSchema,
+  steps: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        classification: intentClassificationSchema,
+        toolCalls: z.array(toolCallSchema),
+        toolResults: z.array(toolResultSchema),
+        mapActionPlan: mapActionPlanSchema
+      })
+    )
+    .default([]),
   narration: narrationSchema,
   clarification: clarificationSchema.optional()
 });

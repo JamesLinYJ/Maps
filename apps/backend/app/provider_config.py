@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from .amap_mcp import inspect_map_tool_runtime
 from .compliance import list_map_providers
 from .schemas import ProviderBindingSummary, RuntimeConfig, StackComponentSummary
 
@@ -61,7 +62,7 @@ def _parse_bool(value: str | None, fallback: bool = False) -> bool:
 def resolve_runtime_defaults(env: dict[str, str] | None = None) -> RuntimeConfig:
     return RuntimeConfig(
         mapMode=_env_value(env, "MAP_MODE", "VITE_MAP_MODE") or "internal",
-        mapProvider=_env_value(env, "MAP_PROVIDER", "VITE_MAP_PROVIDER") or "osm",
+        mapProvider=_env_value(env, "MAP_PROVIDER", "VITE_MAP_PROVIDER") or "amap",
         llmProvider=_env_value(env, "LLM_PROVIDER", "VITE_LLM_PROVIDER") or "openai",
         enableForeignMapExperiments=_parse_bool(
             _env_value(
@@ -69,7 +70,7 @@ def resolve_runtime_defaults(env: dict[str, str] | None = None) -> RuntimeConfig
                 "ENABLE_FOREIGN_MAP_EXPERIMENTS",
                 "VITE_ENABLE_FOREIGN_MAP_EXPERIMENTS",
             ),
-            True,
+            False,
         ),
     )
 
@@ -92,6 +93,7 @@ def describe_runtime_assembly(
     map_ready = True if map_key is None else bool(source.get(map_key))
     litellm_base_url = source.get("LITELLM_BASE_URL")
     litellm_api_key = source.get("LITELLM_API_KEY")
+    tool_runtime = inspect_map_tool_runtime(source)
 
     # 这里把“直连 provider”和“统一走 LiteLLM 网关”都视为真实可调用路径。
     effective_llm_ready = llm_ready or bool(litellm_base_url)
@@ -139,7 +141,9 @@ def describe_runtime_assembly(
             kind="map",
             providerId=runtime.map_provider.value,
             adapterMode=(
-                "public_access"
+                tool_runtime["adapterMode"]
+                if tool_runtime["backend"] == "amap_mcp"
+                else "public_access"
                 if runtime.map_provider.value == "osm"
                 else "credential_ready_placeholder"
                 if map_ready
@@ -147,7 +151,9 @@ def describe_runtime_assembly(
             ),
             credentialEnvVar=map_key,
             message=(
-                "OpenStreetMap 当前按公开访问方式接入，仅在 internal 或 experimental 模式下作为实验参考底图开放。"
+                f'{tool_runtime["message"]} 当前展示底图 provider 为 {runtime.map_provider.value}。'
+                if tool_runtime["backend"] == "amap_mcp"
+                else "OpenStreetMap 当前按公开访问方式接入，仅在 internal 或 experimental 模式下作为实验参考底图开放。"
                 if runtime.map_provider.value == "osm"
                 else f"{map_key} 已提供，地图服务可按当前 provider 抽象接入。"
                 if map_ready
@@ -195,6 +201,7 @@ def describe_runtime_assembly(
         )
     if not map_ready and map_key is not None:
         warnings.append(f"{map_key} 未配置，当前 map provider 不可用。")
+    warnings.extend(str(item) for item in tool_runtime["warnings"])
 
     provider_option = next(
         (item for item in list_map_providers(runtime) if item["id"] == runtime.map_provider.value),
@@ -226,8 +233,8 @@ def describe_runtime_assembly(
         ),
         StackComponentSummary(
             category="maps",
-            stack="OpenStreetMap / domestic-compliant providers",
-            detail="当前以 OSM 或国内合规 provider 提供地图能力，公开模式仍保留国内合规约束。",
+            stack="AMap MCP / OpenStreetMap / domestic-compliant providers",
+            detail=f'当前地图工具层为 {tool_runtime["backend"]}，展示底图 provider 为 {runtime.map_provider.value}，公开模式仍保留国内合规约束。',
         ),
         StackComponentSummary(
             category="data",
@@ -241,6 +248,6 @@ def describe_runtime_assembly(
         "strictProviderConfig": strict,
         "bindings": bindings,
         "warnings": warnings,
-        "architectureSummary": "当前原型采用前端展示 + Python 后端编排 + PydanticAI 智能体层 + 多模型 provider 接入层 + 地图服务层 + 语音交互层的技术架构，并保留 OpenAI-compatible 与 LiteLLM 网关路径。",
+        "architectureSummary": "当前原型采用前端展示 + Python 后端编排 + PydanticAI 智能体层 + 多模型 provider 接入层 + 高德 MCP 工具层 + 语音交互层的技术架构，并保留 OpenAI-compatible 与 LiteLLM 网关路径。",
         "stack": stack,
     }

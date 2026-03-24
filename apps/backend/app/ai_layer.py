@@ -4,6 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 
+from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.anthropic import AnthropicModel
 from pydantic_ai.models.google import GoogleModel
@@ -12,12 +13,13 @@ from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.providers.google import GoogleProvider
 from pydantic_ai.providers.litellm import LiteLLMProvider
 from pydantic_ai.providers.openai import OpenAIProvider
-
+from pydantic_ai.settings import ModelSettings
 from .nl2sql import Nl2SqlPlan, Nl2SqlPlanner
 from .schemas import (
     Clarification,
     ClarificationOption,
     IntentClassification,
+    IntentKind,
     Layer,
     MapActionPlan,
     Narration,
@@ -47,12 +49,26 @@ INTENT_AGENT_INSTRUCTIONS = """
 
 你的职责：
 1. 只从用户话语和当前地图上下文中提取意图，不要编造地理事实。
-2. 只输出允许的 intent 枚举值。
-3. 如果用户说“卫星图”或类似表达，requestedLayer 应为 satellite。
-4. 如果用户在讲路线，提取 route.from 和 route.to。
-5. 如果用户在请求多个点位的顺序讲解，使用 multi_point_story，并尽量补全 pointQueries。
-6. 如果用户是在当前高亮对象基础上追问“详细一点”“这里”“这个园区”，优先识别为 detail_follow_up 或 focus_area。
-7. confidence 返回 0 到 1 之间的数值。
+2. 根据用户请求决定是否拆成多步执行；能 1 步完成就不要拆多步。
+3. steps 必须按执行顺序返回，最多 4 步，至少 1 步。
+4. 每一步输出一个 intent，并自行判断是否需要 toolCalls。
+5. toolCalls 仅可使用 poiSearch、areaLookup、routeSummary；如果只是镜头、图层、俯仰、旋转、清理类动作，通常不需要工具。
+6. 涉及地点事实、区域边界、路线、沿线地标时，优先调用工具，不要靠想象补地理信息。
+7. 如果用户是在当前高亮对象基础上追问“详细一点”“这里”“这个园区”，可以使用 detail_follow_up，也可以结合上下文决定 focus_area。
+8. confidence 返回 0 到 1 之间的数值。
+
+可选 intent 包括：
+- focus_area
+- route_overview
+- layer_switch
+- zoom_in
+- zoom_out
+- reset_view
+- tilt_view
+- rotate_view
+- clear_overlays
+- detail_follow_up
+- multi_point_story
 
 不要输出解释文字，只返回结构化结果。
 """.strip()
@@ -70,7 +86,6 @@ NARRATION_AGENT_INSTRUCTIONS = """
 只返回结构化 narration，不要输出额外说明。
 """.strip()
 
-
 class ProviderConfigurationError(RuntimeError):
     """Raised when the selected provider cannot be called with the current env."""
 
@@ -80,9 +95,16 @@ class UpstreamProviderError(RuntimeError):
 
 
 @dataclass
-class AgentPlanningResult:
+class PlannedTurnStep:
+    id: str
     classification: IntentClassification
     tool_calls: list[dict[str, object]]
+
+
+@dataclass
+class AgentPlanningResult:
+    classification: IntentClassification
+    steps: list[PlannedTurnStep]
     nl2sql_plan: Nl2SqlPlan | None
 
 
@@ -91,6 +113,20 @@ class ProviderRuntime:
     provider_id: str
     model_name: str
     transport_mode: str
+
+
+class IntentExecutionPlan(BaseModel):
+    steps: list["TurnStepPlan"] = Field(min_length=1, max_length=4)
+
+
+class PlannedToolCall(BaseModel):
+    tool_name: str = Field(alias="toolName")
+    arguments: dict[str, object] = Field(default_factory=dict)
+
+
+class TurnStepPlan(BaseModel):
+    classification: IntentClassification
+    tool_calls: list[PlannedToolCall] = Field(default_factory=list, alias="toolCalls")
 
 
 def _env_value(env: dict[str, str], key: str) -> str | None:
@@ -114,6 +150,19 @@ def _build_grounding_ids(tool_results: list[dict[str, object]]) -> list[str]:
     return list(dict.fromkeys(grounded_ids))
 
 
+def _is_dashscope_qwen_compatible(model_name: str, base_url: str | None) -> bool:
+    normalized_model = model_name.strip().lower()
+    normalized_base_url = (base_url or "").strip().lower()
+    return normalized_model.startswith("qwen") and "dashscope.aliyuncs.com" in normalized_base_url
+
+
+def _build_openai_model_settings(model_name: str, base_url: str | None) -> ModelSettings | None:
+    if _is_dashscope_qwen_compatible(model_name, base_url):
+        # 千问官方文档建议显式传 enable_thinking，避免默认思考模式与结构化输出冲突。
+        return ModelSettings(extra_body={"enable_thinking": False})
+    return None
+
+
 class LlmAgent:
     def __init__(
         self,
@@ -125,15 +174,15 @@ class LlmAgent:
         self._env = dict(os.environ if env is None else env)
         self._nl2sql = nl2sql_planner or Nl2SqlPlanner()
         self._runtime = self._resolve_provider_runtime()
-        model = self._create_model()
+        self._model = self._create_model()
         self._intent_agent = Agent(
-            model=model,
-            output_type=IntentClassification,
+            model=self._model,
+            output_type=IntentExecutionPlan,
             instructions=INTENT_AGENT_INSTRUCTIONS,
             retries=2,
         )
         self._narration_agent = Agent(
-            model=model,
+            model=self._model,
             output_type=Narration,
             instructions=NARRATION_AGENT_INSTRUCTIONS,
             retries=2,
@@ -185,7 +234,11 @@ class LlmAgent:
                     "OPENAI_API_KEY 未配置，当前无法调用 OpenAI-compatible provider。"
                 )
             provider = OpenAIProvider(base_url=base_url, api_key=api_key)
-            return OpenAIChatModel(self._runtime.model_name, provider=provider)
+            return OpenAIChatModel(
+                self._runtime.model_name,
+                provider=provider,
+                settings=_build_openai_model_settings(self._runtime.model_name, base_url),
+            )
 
         if self._provider_id == "anthropic":
             api_key = _env_value(self._env, "ANTHROPIC_API_KEY")
@@ -211,57 +264,143 @@ class LlmAgent:
         self,
         transcript_text: str,
         highlighted_feature_ids: list[str],
+        active_layer: str,
     ) -> AgentPlanningResult:
-        classification = self.classify_intent(transcript_text, highlighted_feature_ids)
+        planned_steps = self.plan_steps(
+            transcript_text, highlighted_feature_ids, active_layer
+        )
+        classification = self._pick_primary_classification(
+            [step.classification for step in planned_steps]
+        )
         return AgentPlanningResult(
             classification=classification,
-            tool_calls=self.plan_tool_calls(classification, highlighted_feature_ids),
+            steps=planned_steps,
             nl2sql_plan=self._nl2sql.maybe_plan(transcript_text, classification),
         )
 
-    def classify_intent(
+    def plan_steps(
         self,
         text: str,
         highlighted_feature_ids: list[str],
-    ) -> IntentClassification:
-        # 意图理解交给真实模型完成，但后续地图动作仍会走代码侧受控链路，
+        active_layer: str,
+    ) -> list[PlannedTurnStep]:
+        # 任务拆解交给真实模型完成，但后续地图动作与地图事实仍会走代码侧受控链路，
         # 避免让模型直接决定路线、边界或高亮结果。
         prompt = (
-            "请分析下面这条地图讲解请求，并输出结构化意图。\n\n"
+            "请分析下面这条地图讲解请求，并输出结构化步骤计划。\n\n"
             f"用户请求:\n{text}\n\n"
             f"当前高亮对象 IDs:\n{json.dumps(highlighted_feature_ids, ensure_ascii=False)}\n"
+            f"当前图层:\n{active_layer}\n"
         )
 
         try:
             result = self._intent_agent.run_sync(prompt)
         except Exception as error:
-            raise self._wrap_provider_error("意图识别", error) from error
+            raise self._wrap_provider_error("意图识别与步骤拆解", error) from error
 
-        classification = result.output
+        raw_steps = result.output.steps
+        return [
+            PlannedTurnStep(
+                id=f"step-{index + 1}",
+                classification=self._normalize_classification(
+                    planned_step.classification,
+                    text,
+                    highlighted_feature_ids,
+                    allow_layer_inference=(
+                        len(raw_steps) == 1
+                        or planned_step.classification.intent == IntentKind.LAYER_SWITCH
+                    ),
+                ),
+                tool_calls=self._normalize_tool_calls(planned_step.tool_calls),
+            )
+            for index, planned_step in enumerate(raw_steps)
+        ]
 
+    def _normalize_tool_calls(
+        self,
+        tool_calls: list[PlannedToolCall],
+    ) -> list[dict[str, object]]:
+        normalized: list[dict[str, object]] = []
+        required_arguments = {
+            "poiSearch": {"query"},
+            "areaLookup": {"featureId"},
+            "routeSummary": {"from", "to"},
+        }
+        for tool_call in tool_calls:
+            if tool_call.tool_name not in {"poiSearch", "areaLookup", "routeSummary"}:
+                continue
+            arguments = {
+                key: value
+                for key, value in tool_call.arguments.items()
+                if isinstance(key, str)
+            }
+            if not required_arguments[tool_call.tool_name].issubset(arguments.keys()):
+                continue
+            normalized.append(
+                {
+                    "toolName": tool_call.tool_name,
+                    "arguments": arguments,
+                }
+            )
+        return normalized
+
+    def _normalize_classification(
+        self,
+        classification: IntentClassification,
+        text: str,
+        highlighted_feature_ids: list[str],
+        allow_layer_inference: bool,
+    ) -> IntentClassification:
         # “这里/这个园区” 这种指代如果模型没补全，就安全地回落到当前高亮对象。
         if (
             highlighted_feature_ids
-            and classification.intent == "focus_area"
+            and classification.intent in (IntentKind.FOCUS_AREA, IntentKind.DETAIL_FOLLOW_UP)
             and not classification.focus_query
             and ("这个园区" in text or "这里" in text)
         ):
             classification.focus_query = highlighted_feature_ids[0]
 
-        if "卫星" in text and classification.requested_layer is None:
+        if allow_layer_inference and "卫星" in text and classification.requested_layer is None:
             classification.requested_layer = Layer.SATELLITE
-        if ("矢量" in text or "普通" in text) and classification.requested_layer is None:
+        if (
+            allow_layer_inference
+            and ("矢量" in text or "普通" in text)
+            and classification.requested_layer is None
+        ):
             classification.requested_layer = Layer.VECTOR
 
         return classification
+
+    def _pick_primary_classification(
+        self,
+        classifications: list[IntentClassification],
+    ) -> IntentClassification:
+        priority = {
+            "route_overview": 5,
+            "multi_point_story": 4,
+            "detail_follow_up": 3,
+            "focus_area": 2,
+            "layer_switch": 1,
+            "zoom_in": 1,
+            "zoom_out": 1,
+            "reset_view": 1,
+            "tilt_view": 1,
+            "rotate_view": 1,
+            "clear_overlays": 1,
+        }
+        return max(
+            classifications,
+            key=lambda item: (
+                priority.get(item.intent.value, 0),
+                item.confidence,
+            ),
+        )
 
     def plan_tool_calls(
         self,
         classification: IntentClassification,
         highlighted_feature_ids: list[str],
     ) -> list[dict[str, object]]:
-        # 工具调用组织保持后端显式控制，这样可以把“模型理解”和“工具执行”
-        # 分离开，避免共享层被某一家 SDK 的 tool calling 细节绑死。
         if classification.intent == "route_overview" and classification.route:
             return [
                 {
@@ -272,18 +411,27 @@ class LlmAgent:
                     },
                 }
             ]
-        if classification.intent == "detail_follow_up" and highlighted_feature_ids:
-            return [
-                {
-                    "toolName": "areaLookup",
-                    "arguments": {"featureId": highlighted_feature_ids[0]},
-                }
-            ]
         if classification.intent == "multi_point_story":
             return [
                 {"toolName": "poiSearch", "arguments": {"query": query}}
                 for query in (classification.point_queries or [])
             ]
+        if classification.intent == "detail_follow_up":
+            if highlighted_feature_ids:
+                return [
+                    {
+                        "toolName": "areaLookup",
+                        "arguments": {"featureId": highlighted_feature_ids[0]},
+                    }
+                ]
+            if classification.focus_query:
+                return [
+                    {
+                        "toolName": "areaLookup",
+                        "arguments": {"featureId": classification.focus_query},
+                    }
+                ]
+            return []
         if classification.intent == "focus_area" and classification.focus_query:
             return [
                 {
@@ -331,8 +479,8 @@ class LlmAgent:
         if empty_poi:
             return Clarification(
                 question=(
-                    f'当前演示场景里还没有“{empty_poi["query"]}”的内置数据，'
-                    "你可以试试浦东新区、陆家嘴、张江科学城或国家会展中心。"
+                    f'当前没有找到“{empty_poi["query"]}”的可用地点结果，'
+                    "你可以换一个更具体的地点名称，或者补充城市、区域、园区等限定信息。"
                 ),
                 options=[],
             )
@@ -384,11 +532,95 @@ class LlmAgent:
                 {
                     "type": "adjust_zoom",
                     "factor": 1.35,
-                    "reason": "Zoom in on the current presentation area",
+                    "reason": "放大当前展示区域",
                 }
             )
             return MapActionPlan(
-                summary="Zoomed into the current focus region.",
+                summary="已放大当前地图视图。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == "zoom_out":
+            actions.append(
+                {
+                    "type": "adjust_zoom",
+                    "factor": 0.72,
+                    "reason": "缩小当前展示区域，扩大观察范围",
+                }
+            )
+            return MapActionPlan(
+                summary="已拉远当前地图视图。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == "reset_view":
+            actions.append(
+                {
+                    "type": "set_camera",
+                    "pitch": 0,
+                    "rotation": 0,
+                    "reason": "恢复标准视角并回正地图朝向",
+                }
+            )
+            return MapActionPlan(
+                summary="已恢复到标准地图视角。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == "tilt_view":
+            actions.append(
+                {
+                    "type": "set_camera",
+                    "pitch": 50,
+                    "rotation": 0,
+                    "reason": "切换到更有空间感的 3D 俯视视角",
+                }
+            )
+            return MapActionPlan(
+                summary="已切换到 3D 俯视视角。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == "rotate_view":
+            actions.append(
+                {
+                    "type": "set_camera",
+                    "rotation": 90,
+                    "reason": "旋转地图视角以观察不同朝向",
+                }
+            )
+            return MapActionPlan(
+                summary="已旋转地图视角。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == "clear_overlays":
+            actions.extend(
+                [
+                    {"type": "clear_route"},
+                    {"type": "clear_highlights"},
+                    {"type": "clear_callouts"},
+                ]
+            )
+            return MapActionPlan(
+                summary="已清除当前路线、高亮和讲解标注。",
+                actions=actions,
+                sourceCards=source_cards,
+            ).model_dump(by_alias=True, exclude_none=True)
+
+        if classification.intent == IntentKind.LAYER_SWITCH:
+            summary = (
+                f"已切换到{'卫星' if classification.requested_layer == Layer.SATELLITE else '标准'}图层。"
+                if classification.requested_layer
+                else "已调整地图图层。"
+            )
+            return MapActionPlan(
+                summary=summary,
                 actions=actions,
                 sourceCards=source_cards,
             ).model_dump(by_alias=True, exclude_none=True)
@@ -484,11 +716,11 @@ class LlmAgent:
             actions.append({"type": "show_callouts", "items": callout_items})
 
         summary = (
-            "Generated a presentation route overview."
+            "已生成路线展示视图。"
             if classification.intent == "route_overview"
-            else "Prepared a sequential point-by-point presentation."
+            else "已生成多点顺序展示视图。"
             if classification.intent == "multi_point_story"
-            else "Prepared a focused presentation view."
+            else "已生成地图聚焦展示视图。"
         )
         return MapActionPlan(
             summary=summary,

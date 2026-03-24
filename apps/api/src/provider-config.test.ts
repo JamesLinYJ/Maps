@@ -29,9 +29,9 @@ describe("provider-config", () => {
 
     expect(runtime).toEqual({
       mapMode: "internal",
-      mapProvider: "osm",
+      mapProvider: "amap",
       llmProvider: "openai",
-      enableForeignMapExperiments: true
+      enableForeignMapExperiments: false
     });
   });
 
@@ -119,7 +119,7 @@ describe("provider-config", () => {
     });
 
     expect(result.runtimeDefaults.mapMode).toBe("internal");
-    expect(result.runtimeDefaults.mapProvider).toBe("osm");
+    expect(result.runtimeDefaults.mapProvider).toBe("amap");
     expect(result.strictProviderConfig).toBe(false);
   });
 });

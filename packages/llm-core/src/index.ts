@@ -109,6 +109,46 @@ function createBaseClassification(transcript: Transcript, mapContext: MapContext
     });
   }
 
+  if (text.includes("缩小") || text.includes("拉远")) {
+    return intentClassificationSchema.parse({
+      intent: "zoom_out",
+      confidence: 0.77,
+      requestedLayer
+    });
+  }
+
+  if (text.includes("回正") || text.includes("标准视角") || text.includes("正北朝上")) {
+    return intentClassificationSchema.parse({
+      intent: "reset_view",
+      confidence: 0.8,
+      requestedLayer
+    });
+  }
+
+  if (text.includes("3d") || text.includes("俯视") || text.includes("抬高视角")) {
+    return intentClassificationSchema.parse({
+      intent: "tilt_view",
+      confidence: 0.78,
+      requestedLayer
+    });
+  }
+
+  if (text.includes("旋转") || text.includes("转一下方向") || text.includes("换个朝向")) {
+    return intentClassificationSchema.parse({
+      intent: "rotate_view",
+      confidence: 0.76,
+      requestedLayer
+    });
+  }
+
+  if (text.includes("清掉") || text.includes("清除标注") || text.includes("清空地图") || text.includes("去掉路线")) {
+    return intentClassificationSchema.parse({
+      intent: "clear_overlays",
+      confidence: 0.78,
+      requestedLayer
+    });
+  }
+
   if (pointQueries.length >= 2 || text.includes("逐个讲解")) {
     return intentClassificationSchema.parse({
       intent: "multi_point_story",
@@ -196,6 +236,11 @@ function buildToolCalls(
         : [];
     case "layer_switch":
     case "zoom_in":
+    case "zoom_out":
+    case "reset_view":
+    case "tilt_view":
+    case "rotate_view":
+    case "clear_overlays":
       return [];
   }
 }
@@ -234,6 +279,82 @@ function buildMapActions(
 
     return mapActionPlanSchema.parse({
       summary: "Zoomed into the current focus region.",
+      actions,
+      sourceCards
+    });
+  }
+
+  if (classification.intent === "zoom_out") {
+    actions.push({
+      type: "adjust_zoom",
+      factor: 0.72,
+      reason: "Zoom out to show a broader presentation area"
+    });
+
+    return mapActionPlanSchema.parse({
+      summary: "已拉远当前地图视图。",
+      actions,
+      sourceCards
+    });
+  }
+
+  if (classification.intent === "reset_view") {
+    actions.push({
+      type: "set_camera",
+      pitch: 0,
+      rotation: 0,
+      reason: "Reset camera to the default north-up presentation view"
+    });
+
+    return mapActionPlanSchema.parse({
+      summary: "已恢复到标准地图视角。",
+      actions,
+      sourceCards
+    });
+  }
+
+  if (classification.intent === "tilt_view") {
+    actions.push({
+      type: "set_camera",
+      pitch: 50,
+      rotation: 0,
+      reason: "Tilt the camera for a more spatial 3D presentation"
+    });
+
+    return mapActionPlanSchema.parse({
+      summary: "已切换到 3D 俯视视角。",
+      actions,
+      sourceCards
+    });
+  }
+
+  if (classification.intent === "rotate_view") {
+    actions.push({
+      type: "set_camera",
+      rotation: 90,
+      reason: "Rotate the camera to inspect the current scene from another orientation"
+    });
+
+    return mapActionPlanSchema.parse({
+      summary: "已旋转地图视角。",
+      actions,
+      sourceCards
+    });
+  }
+
+  if (classification.intent === "clear_overlays") {
+    actions.push({
+      type: "clear_route"
+    });
+    actions.push({
+      type: "clear_highlights"
+    });
+    actions.push({
+      type: "clear_callouts"
+    });
+
+    return mapActionPlanSchema.parse({
+      summary: "已清除当前路线、高亮和讲解标注。",
       actions,
       sourceCards
     });
@@ -327,10 +448,10 @@ function buildMapActions(
   return mapActionPlanSchema.parse({
     summary:
       classification.intent === "route_overview"
-        ? "Generated a presentation route overview."
+        ? "已生成路线展示视图。"
         : classification.intent === "multi_point_story"
-          ? "Prepared a sequential point-by-point presentation."
-          : "Prepared a focused presentation view.",
+          ? "已生成多点顺序展示视图。"
+          : "已生成地图聚焦展示视图。",
     actions,
     sourceCards
   });
@@ -378,6 +499,36 @@ function createNarrationText(style: "concise" | "guided", request: CreateNarrati
     return style === "concise"
       ? "我已经把当前视角再放大一点，方便继续讲解。"
       : "我把镜头再推进了一些，这样你接下来查看重点区域会更清楚。";
+  }
+
+  if (classification.intent === "zoom_out") {
+    return style === "concise"
+      ? "我已经把视角拉远一点，方便观察整体范围。"
+      : "我把镜头稍微拉远了一些，这样你可以先看清整体范围，再继续讲解细节。";
+  }
+
+  if (classification.intent === "reset_view") {
+    return style === "concise"
+      ? "我已经把地图回正，并恢复到标准视角。"
+      : "我已经把地图恢复到标准视角并回正朝向，这样后续讲解会更稳定清晰。";
+  }
+
+  if (classification.intent === "tilt_view") {
+    return style === "concise"
+      ? "我已经切到 3D 俯视视角。"
+      : "我已经把地图切换到更有空间感的 3D 俯视视角，方便你观察楼块和区域关系。";
+  }
+
+  if (classification.intent === "rotate_view") {
+    return style === "concise"
+      ? "我已经把地图旋转到新的观察朝向。"
+      : "我已经把地图旋转到了新的观察朝向，方便你从另一个方向继续看当前区域。";
+  }
+
+  if (classification.intent === "clear_overlays") {
+    return style === "concise"
+      ? "我已经清除了当前路线、标注和高亮。"
+      : "我已经把当前路线、高亮和讲解标注清掉了，地图画面现在更干净，可以重新开始下一步展示。";
   }
 
   if (classification.intent === "layer_switch" && featureNames.length === 0) {

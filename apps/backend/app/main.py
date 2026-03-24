@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ai_layer import ProviderConfigurationError, UpstreamProviderError
+from .amap_mcp import MapToolConfigurationError, MapToolExecutionError
 from .schemas import HandleTurnRequest, HandleTurnResponse, RuntimeConfigResponse
 from .service import AssistantService
 
@@ -21,6 +22,29 @@ app.add_middleware(
 service = AssistantService()
 DIST_DIR = Path(__file__).resolve().parents[3] / "dist" / "web"
 INDEX_FILE = DIST_DIR / "index.html"
+
+
+def _format_map_tool_error(error: MapToolExecutionError) -> str:
+    message = str(error)
+    if "ENGINE_RESPONSE_DATA_ERROR" not in message:
+        return message
+
+    if "maps_direction_driving" in message:
+        return (
+            "高德地图当前无法生成这条路线，地图服务返回 ENGINE_RESPONSE_DATA_ERROR。"
+            "请换一组更明确的起点和终点后重试。"
+        )
+
+    if any(tool_name in message for tool_name in ("maps_search_detail", "maps_text_search", "maps_geo")):
+        return (
+            "高德地图当前无法解析该地点或区域，地图服务返回 ENGINE_RESPONSE_DATA_ERROR。"
+            "请换一个更具体的地点名称，或补充城市、区域后重试。"
+        )
+
+    return (
+        "高德地图当前无法完成这次查询，地图服务返回 ENGINE_RESPONSE_DATA_ERROR。"
+        "请调整输入后重试。"
+    )
 
 
 @app.get("/health")
@@ -52,8 +76,12 @@ def handle_turn(payload: HandleTurnRequest) -> HandleTurnResponse:
     except ProviderConfigurationError as error:
         # 缺少真实 provider 配置时直接返回 503，避免静默退回占位逻辑。
         raise HTTPException(status_code=503, detail=str(error)) from error
+    except MapToolConfigurationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except UpstreamProviderError as error:
         raise HTTPException(status_code=502, detail=str(error)) from error
+    except MapToolExecutionError as error:
+        raise HTTPException(status_code=502, detail=_format_map_tool_error(error)) from error
 
 
 @app.get("/")

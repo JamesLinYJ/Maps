@@ -14,7 +14,7 @@ For the recommended long-term stack, see `docs/architecture/recommended-stack.md
 - Default runtime targets `internal + osm + enableForeignMapExperiments=true` so local development does not boot straight into `china_public`.
 - Missing credentials are surfaced as configuration gaps instead of placeholder adapters.
 - `STRICT_PROVIDER_CONFIG=true` turns missing credentials into startup/runtime errors.
-- Even when credentials are present, the current repository still uses placeholder adapters; the assembly layer is ready for real SDK wiring later.
+- When `AMAP_API_KEY` is provided, the Python backend now routes map queries through the integrated AMap MCP adapter instead of placeholder scenario data.
 - The `openai` route should be read as an `OpenAI-compatible` path, so it can later target either official OpenAI endpoints or compatible gateways that speak the same interface shape.
 - The frontend reads runtime defaults and binding state from `GET /api/runtime`.
 - `osm` is available as a foreign experimental provider and does not require a credential, but it must stay out of `china_public` mode.
@@ -39,6 +39,8 @@ This means the current environment variables remain useful, but the implementati
 - `STRICT_PROVIDER_CONFIG`
 - `TIANDITU_API_KEY`
 - `AMAP_API_KEY`
+- `AMAP_MCP_SERVER_URL`
+- `AMAP_MCP_TIMEOUT_SECONDS`
 - `MAPBOX_ACCESS_TOKEN`
 - `OPENAI_API_KEY`
 - `OPENAI_COMPAT_BASE_URL`
@@ -55,5 +57,5 @@ Add `VITE_API_BASE_URL` when the frontend should target a non-default backend ad
 1. Replace the placeholder logic inside `apps/backend/app/ai_layer.py` with a real provider-backed orchestration path.
 2. Keep the HTTP response contracts stable so the frontend client does not need rewrites.
 3. Preserve compliance checks in `resolveMapPolicy()` and provider gating in `describe_runtime_assembly()`.
-4. Replace placeholder map and voice adapters incrementally instead of swapping all layers at once.
+4. The current map tool implementation uses the integrated AMap MCP adapter for `poiSearch / areaLookup / routeSummary`, and keeps the frontend JSON contract stable.
 5. Add integration tests for each real adapter before enabling it by default.

@@ -1,136 +1,89 @@
 from __future__ import annotations
 
-from .scenario_data import (
-    FEATURES,
-    SOURCE_CARDS,
-    ROUTE_LANDMARKS_BY_ID,
-    ROUTE_PATHS_BY_ID,
-)
-from .schemas import (
-    AreaKeyPoint,
-    AreaLookupResult,
-    MapFeature,
-    PoiSearchResult,
-    RouteAmbiguity,
-    RouteSummaryResult,
-)
+import os
 
-
-def _normalize(text: str) -> str:
-    return text.strip().lower()
+from .amap_mcp import SOURCE_CARDS, AmapMcpClient
+from .schemas import AreaKeyPoint, AreaLookupResult, MapFeature, RuntimeConfig
 
 
 class MapService:
-    def search_features(self, query: str) -> list[MapFeature]:
-        normalized = _normalize(query)
-        return [
-            feature
-            for feature in FEATURES
-            if normalized in feature.id.lower()
-            or normalized in feature.name.lower()
-            or any(normalized in alias.lower() for alias in feature.aliases)
-        ]
+    def __init__(
+        self,
+        env: dict[str, str] | None = None,
+        amap_client: AmapMcpClient | None = None,
+    ) -> None:
+        self._env = dict(os.environ if env is None else env)
+        self._feature_cache: dict[str, MapFeature] = {}
+        self._amap = amap_client
 
-    def feature_by_id(self, feature_id: str) -> MapFeature | None:
-        return next((feature for feature in FEATURES if feature.id == feature_id), None)
+    def _get_amap(self) -> AmapMcpClient:
+        if self._amap is None:
+            self._amap = AmapMcpClient(self._env)
+        return self._amap
 
-    def poi_search(self, query: str) -> dict[str, object]:
-        matches = self.search_features(query)
-        return PoiSearchResult(
-            query=query,
-            isAmbiguous=len(matches) > 1,
-            features=matches,
-            sourceCards=SOURCE_CARDS,
-        ).model_dump(by_alias=True)
+    def poi_search(self, query: str, runtime: RuntimeConfig) -> dict[str, object]:
+        del runtime
+        result = self._get_amap().poi_search(query)
+        self._remember_features(result)
+        return result
 
-    def area_lookup(self, feature_id: str) -> dict[str, object]:
-        feature = self.feature_by_id(feature_id)
-        if not feature:
-            raise ValueError(f'Unknown featureId "{feature_id}"')
-
-        return AreaLookupResult(
-            feature=feature,
-            keyPoints=[
-                AreaKeyPoint(
-                    title=bullet,
-                    body=f"{feature.name}演示视图中的重点讲解方向：{bullet}。",
-                )
-                for bullet in feature.narrative_bullets
-            ],
-            sourceCards=SOURCE_CARDS,
-        ).model_dump(by_alias=True)
-
-    def route_summary(self, start_query: str, end_query: str) -> dict[str, object]:
-        start_matches = self.search_features(start_query)
-        end_matches = self.search_features(end_query)
-
-        if len(start_matches) > 1:
-            # 路线服务优先返回澄清信息，避免把歧义地点直接当成确定路线。
-            return RouteSummaryResult(
-                routeId="route-ambiguity-from",
-                name="Ambiguous Route Request",
-                summary="需要先澄清出发点。",
-                ambiguity=RouteAmbiguity(
-                    field="from",
-                    query=start_query,
-                    options=start_matches,
-                ),
+    def area_lookup(self, feature_id_or_query: str, runtime: RuntimeConfig) -> dict[str, object]:
+        del runtime
+        cached_feature = self._feature_cache.get(feature_id_or_query)
+        if cached_feature:
+            return AreaLookupResult(
+                feature=cached_feature,
+                keyPoints=[
+                    AreaKeyPoint(
+                        title=f"重点 {index + 1}",
+                        body=f"{cached_feature.name}：{bullet}",
+                    )
+                    for index, bullet in enumerate(
+                        cached_feature.narrative_bullets[:3] or [cached_feature.description]
+                    )
+                ],
                 sourceCards=SOURCE_CARDS,
             ).model_dump(by_alias=True)
 
-        if len(end_matches) > 1:
-            # 终点同样先澄清，再进入路线概览，保证讲解结果可解释。
-            return RouteSummaryResult(
-                routeId="route-ambiguity-to",
-                name="Ambiguous Route Request",
-                summary="需要先澄清终点。",
-                ambiguity=RouteAmbiguity(
-                    field="to",
-                    query=end_query,
-                    options=end_matches,
-                ),
-                sourceCards=SOURCE_CARDS,
-            ).model_dump(by_alias=True)
+        result = self._get_amap().area_lookup(feature_id_or_query)
+        self._remember_features(result)
+        return result
 
-        start_feature = start_matches[0] if start_matches else None
-        end_feature = end_matches[0] if end_matches else None
-        if not start_feature or not end_feature:
-            raise ValueError(
-                f'Unable to summarize route from "{start_query}" to "{end_query}"'
-            )
+    def route_summary(
+        self, start_query: str, end_query: str, runtime: RuntimeConfig
+    ) -> dict[str, object]:
+        del runtime
+        result = self._get_amap().route_summary(start_query, end_query)
+        self._remember_features(result)
+        return result
 
-        # 这里返回的是演示路线的概览 ID，不是实时导航计算结果。
-        route_id = (
-            "route-pvg-necc"
-            if start_feature.id == "hub-pudong-airport"
-            else "route-hq-necc"
-        )
-        return RouteSummaryResult(
-            routeId=route_id,
-            name=f"{start_feature.name} 到 {end_feature.name}",
-            startFeature=start_feature,
-            endFeature=end_feature,
-            bounds=(
-                min(start_feature.bbox[0], end_feature.bbox[0]),
-                min(start_feature.bbox[1], end_feature.bbox[1]),
-                max(start_feature.bbox[2], end_feature.bbox[2]),
-                max(start_feature.bbox[3], end_feature.bbox[3]),
-            ),
-            path=ROUTE_PATHS_BY_ID[route_id],
-            landmarks=ROUTE_LANDMARKS_BY_ID[route_id],
-            summary=f"展示从{start_feature.name}到{end_feature.name}的路线概览。",
-            # 明确声明这是讲解型路线摘要，不提供导航级别承诺。
-            cautions=["该路线为概览摘要，不提供精确导航与实时交通判断。"],
-            sourceCards=SOURCE_CARDS,
-        ).model_dump(by_alias=True)
-
-    def run_tool_call(self, tool_call: dict[str, object]) -> dict[str, object]:
+    def run_tool_call(
+        self, tool_call: dict[str, object], runtime: RuntimeConfig
+    ) -> dict[str, object]:
         tool_name = tool_call["toolName"]
         arguments = tool_call["arguments"]
         if tool_name == "poiSearch":
-            return self.poi_search(str(arguments["query"]))
+            return self.poi_search(str(arguments["query"]), runtime)
         if tool_name == "areaLookup":
-            return self.area_lookup(str(arguments["featureId"]))
+            return self.area_lookup(str(arguments["featureId"]), runtime)
         if tool_name == "routeSummary":
-            return self.route_summary(str(arguments["from"]), str(arguments["to"]))
+            return self.route_summary(str(arguments["from"]), str(arguments["to"]), runtime)
         raise ValueError(f"Unknown tool: {tool_name}")
+
+    def _remember_features(self, result: dict[str, object]) -> None:
+        if result.get("tool") == "poiSearch":
+            for feature in result.get("features", []):
+                self._feature_cache[feature["id"]] = MapFeature.model_validate(feature)
+        elif result.get("tool") == "areaLookup":
+            feature = result.get("feature")
+            if feature:
+                self._feature_cache[feature["id"]] = MapFeature.model_validate(feature)
+        elif result.get("tool") == "routeSummary":
+            if result.get("startFeature"):
+                self._feature_cache[result["startFeature"]["id"]] = MapFeature.model_validate(
+                    result["startFeature"]
+                )
+            if result.get("endFeature"):
+                self._feature_cache[result["endFeature"]["id"]] = MapFeature.model_validate(
+                    result["endFeature"]
+                )
