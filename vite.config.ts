@@ -7,6 +7,7 @@ const rootDir = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
   root: resolve(rootDir, "apps/web"),
+  envDir: rootDir,
   build: {
     outDir: resolve(rootDir, "dist/web"),
     emptyOutDir: true
